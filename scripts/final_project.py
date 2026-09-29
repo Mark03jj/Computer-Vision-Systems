@@ -1,5 +1,6 @@
 import csv
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -16,6 +17,16 @@ CONFIDENCE_THRESHOLD = 0.50
 TARGET_LABEL = "person"
 COOLDOWN_SECONDS = 5
 
+if not os.path.exists(MODEL_PATH):
+    print(f"Model file not found: {MODEL_PATH}")
+    print("Check that model.tflite is inside the models folder.")
+    sys.exit(1)
+
+if not os.path.exists(LABELS_PATH):
+    print(f"Labels file not found: {LABELS_PATH}")
+    print("Check that labels.txt is inside the models folder.")
+    sys.exit(1)
+
 with open(LABELS_PATH, "r") as file:
     labels = [line.strip() for line in file.readlines()]
 
@@ -26,8 +37,12 @@ if not os.path.exists(LOG_PATH):
         writer = csv.writer(file)
         writer.writerow(["timestamp", "label", "confidence", "people_count"])
 
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
+try:
+    interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+    interpreter.allocate_tensors()
+except Exception as error:
+    print(f"Could not load TensorFlow Lite model: {error}")
+    sys.exit(1)
 
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
@@ -35,15 +50,20 @@ output_details = interpreter.get_output_details()
 input_height = input_details[0]["shape"][1]
 input_width = input_details[0]["shape"][2]
 
-last_logged_time = 0
-
-picam2 = Picamera2()
-picam2.configure(
-    picam2.create_preview_configuration(
-        main={"format": "XRGB8888", "size": (640, 480)}
+try:
+    picam2 = Picamera2()
+    picam2.configure(
+        picam2.create_preview_configuration(
+            main={"format": "XRGB8888", "size": (640, 480)}
+        )
     )
-)
-picam2.start()
+    picam2.start()
+except Exception as error:
+    print(f"Camera failed to start: {error}")
+    print("Check the camera ribbon cable and restart the Pi if needed.")
+    sys.exit(1)
+
+last_logged_time = 0
 
 try:
     while True:
@@ -78,10 +98,10 @@ try:
             best_confidence = max(best_confidence, float(score))
 
             ymin, xmin, ymax, xmax = boxes[i]
-            x1 = int(xmin * frame_width)
-            y1 = int(ymin * frame_height)
-            x2 = int(xmax * frame_width)
-            y2 = int(ymax * frame_height)
+            x1 = max(0, int(xmin * frame_width))
+            y1 = max(0, int(ymin * frame_height))
+            x2 = min(frame_width, int(xmax * frame_width))
+            y2 = min(frame_height, int(ymax * frame_height))
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(
@@ -96,35 +116,57 @@ try:
 
         current_time = time.time()
 
-        if people_count > 0 and current_time - last_logged_time >= COOLDOWN_SECONDS:
-            timestamp = datetime.now().isoformat(timespec="seconds")
+        if people_count > 0:
+            status = "PERSON DETECTED"
+            status_color = (0, 255, 0)
 
-            with open(LOG_PATH, "a", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow(
-                    [timestamp, "person", f"{best_confidence:.2f}", people_count]
+            if current_time - last_logged_time >= COOLDOWN_SECONDS:
+                timestamp = datetime.now().isoformat(timespec="seconds")
+
+                with open(LOG_PATH, "a", newline="") as file:
+                    writer = csv.writer(file)
+                    writer.writerow(
+                        [
+                            timestamp,
+                            "person",
+                            f"{best_confidence:.2f}",
+                            people_count
+                        ]
+                    )
+
+                last_logged_time = current_time
+                print(
+                    f"Logged: {timestamp}, person, "
+                    f"confidence={best_confidence:.2f}, count={people_count}"
                 )
-
-            last_logged_time = current_time
-            print(
-                f"Logged: {timestamp}, person, "
-                f"confidence={best_confidence:.2f}, count={people_count}"
-            )
+        else:
+            status = "NO PERSON DETECTED"
+            status_color = (0, 0, 255)
 
         cv2.putText(
             frame,
-            f"People detected: {people_count}",
+            status,
             (10, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
-            (0, 255, 0),
+            status_color,
             2
         )
 
         cv2.putText(
             frame,
-            f"Threshold: {CONFIDENCE_THRESHOLD:.2f}",
-            (10, 65),
+            f"People detected: {people_count}",
+            (10, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Confidence threshold: {CONFIDENCE_THRESHOLD:.2f}",
+            (10, 100),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             (255, 255, 255),
@@ -148,6 +190,9 @@ try:
 
 except KeyboardInterrupt:
     print("Stopped by user")
+
+except Exception as error:
+    print(f"Program error: {error}")
 
 finally:
     picam2.stop()
