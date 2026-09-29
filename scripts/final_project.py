@@ -1,3 +1,8 @@
+import csv
+import os
+import time
+from datetime import datetime
+
 import cv2
 import numpy as np
 import tensorflow as tf
@@ -5,11 +10,21 @@ from picamera2 import Picamera2
 
 MODEL_PATH = "models/model.tflite"
 LABELS_PATH = "models/labels.txt"
+LOG_PATH = "data/occupancy_log.csv"
+
 CONFIDENCE_THRESHOLD = 0.50
 TARGET_LABEL = "person"
+COOLDOWN_SECONDS = 5
 
 with open(LABELS_PATH, "r") as file:
     labels = [line.strip() for line in file.readlines()]
+
+os.makedirs("data", exist_ok=True)
+
+if not os.path.exists(LOG_PATH):
+    with open(LOG_PATH, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["timestamp", "label", "confidence", "people_count"])
 
 interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
@@ -19,6 +34,8 @@ output_details = interpreter.get_output_details()
 
 input_height = input_details[0]["shape"][1]
 input_width = input_details[0]["shape"][2]
+
+last_logged_time = 0
 
 picam2 = Picamera2()
 picam2.configure(
@@ -45,6 +62,7 @@ try:
         scores = interpreter.get_tensor(output_details[2]["index"])[0]
 
         people_count = 0
+        best_confidence = 0.0
 
         for i, score in enumerate(scores):
             if score < CONFIDENCE_THRESHOLD:
@@ -57,6 +75,7 @@ try:
                 continue
 
             people_count += 1
+            best_confidence = max(best_confidence, float(score))
 
             ymin, xmin, ymax, xmax = boxes[i]
             x1 = int(xmin * frame_width)
@@ -75,6 +94,23 @@ try:
                 2
             )
 
+        current_time = time.time()
+
+        if people_count > 0 and current_time - last_logged_time >= COOLDOWN_SECONDS:
+            timestamp = datetime.now().isoformat(timespec="seconds")
+
+            with open(LOG_PATH, "a", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    [timestamp, "person", f"{best_confidence:.2f}", people_count]
+                )
+
+            last_logged_time = current_time
+            print(
+                f"Logged: {timestamp}, person, "
+                f"confidence={best_confidence:.2f}, count={people_count}"
+            )
+
         cv2.putText(
             frame,
             f"People detected: {people_count}",
@@ -82,6 +118,16 @@ try:
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 255, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Threshold: {CONFIDENCE_THRESHOLD:.2f}",
+            (10, 65),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
             2
         )
 
